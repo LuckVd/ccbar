@@ -19,6 +19,58 @@ const path = require('node:path');
 const os = require('node:os');
 const { execSync } = require('node:child_process');
 
+// Cache directory for persisting data between invocations
+const CACHE_DIR = path.join(os.homedir(), '.claude', 'ccbar', 'cache');
+
+/**
+ * Ensure cache directory exists
+ */
+function ensureCacheDir() {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+}
+
+/**
+ * Get cache file path for a transcript
+ */
+function getCachePath(transcriptPath) {
+  // Create a safe filename from transcript path
+  const hash = Buffer.from(transcriptPath).toString('base64').replace(/[/+=]/g, '');
+  return path.join(CACHE_DIR, `context_${hash}.json`);
+}
+
+/**
+ * Load cached context info
+ */
+function loadContextCache(transcriptPath) {
+  try {
+    const cachePath = getCachePath(transcriptPath);
+    if (fs.existsSync(cachePath)) {
+      const data = fs.readFileSync(cachePath, 'utf-8');
+      return JSON.parse(data);
+    }
+  }
+  catch {
+    // Ignore cache errors
+  }
+  return null;
+}
+
+/**
+ * Save context info to cache
+ */
+function saveContextCache(transcriptPath, data) {
+  try {
+    ensureCacheDir();
+    const cachePath = getCachePath(transcriptPath);
+    fs.writeFileSync(cachePath, JSON.stringify(data), 'utf-8');
+  }
+  catch {
+    // Ignore cache errors
+  }
+}
+
 /**
  * Load configuration from file
  * Config location: ~/.claude/ccbar/config.json
@@ -52,6 +104,68 @@ function loadConfig() {
   }
   catch {
     return defaultConfig;
+  }
+}
+
+/**
+ * Load Claude Code settings for model context windows
+ * Config location: ~/.claude/settings.json
+ */
+function loadModelContextWindows() {
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+  // Default context windows (fallback)
+  const defaultContextWindows = {
+    'glm-4.7': 200000,
+    'glm-5': 200000,
+    'glm-5.1': 200000,
+    'claude-3-5-sonnet': 200000,
+    'claude-3-5-opus': 200000,
+    'claude-3-haiku': 200000,
+  };
+
+  if (!fs.existsSync(settingsPath)) {
+    return defaultContextWindows;
+  }
+
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    const modelContextWindow = settings.modelContextWindow || {};
+    return { ...defaultContextWindows, ...modelContextWindow };
+  }
+  catch {
+    return defaultContextWindows;
+  }
+}
+
+/**
+ * Load pricing from Claude Code settings
+ * Pricing format per model: { input: price_per_million, output: price_per_million, cache: price_per_million, currency: "CNY"|"USD" }
+ */
+function loadPricing() {
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+  // Default pricing (USD per million tokens)
+  const defaultPricing = {
+    'glm-4.7': { input: 0.15, output: 0.60, cache: 0.015, currency: 'USD' },
+    'glm-5': { input: 0.20, output: 0.80, cache: 0.02, currency: 'USD' },
+    'glm-5.1': { input: 0.20, output: 0.80, cache: 0.02, currency: 'USD' },
+    'claude-3-5-sonnet': { input: 3.00, output: 15.00, cache: 0.30, currency: 'USD' },
+    'claude-3-5-opus': { input: 15.00, output: 75.00, cache: 1.50, currency: 'USD' },
+    'claude-3-haiku': { input: 0.25, output: 1.25, cache: 0.03, currency: 'USD' },
+  };
+
+  if (!fs.existsSync(settingsPath)) {
+    return defaultPricing;
+  }
+
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    const modelPricing = settings.modelPricing || {};
+    return { ...defaultPricing, ...modelPricing };
+  }
+  catch {
+    return defaultPricing;
   }
 }
 
@@ -96,9 +210,6 @@ const ICONS = {
   git: 'G:',
   gitClean: '',
   gitDirty: '*',
-  context: '',
-  token: 'T:',
-  separator: ' | ',
 };
 
 /**
@@ -202,19 +313,29 @@ function getSessionDuration(transcriptPath) {
 /**
  * Get git file changes (added/removed lines)
  */
-function getGitChanges() {
+function getGitChanges(workspaceDir) {
   try {
     // Get working directory changes
     const working = execSync('git diff --numstat', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: workspaceDir,
     }).trim();
 
     // Get staged changes
     const staged = execSync('git diff --cached --numstat', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: workspaceDir,
     }).trim();
+
+    // Get untracked files count
+    const untrackedResult = execSync('git ls-files --others --exclude-standard', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: workspaceDir,
+    }).trim();
+    const untrackedFiles = untrackedResult ? untrackedResult.split('\n').filter(f => f.trim()).length : 0;
 
     let added = 0;
     let removed = 0;
@@ -238,6 +359,9 @@ function getGitChanges() {
         removed += parseInt(parts[1]) || 0;
       }
     }
+
+    // Add untracked files as additions (estimate 1 line per file)
+    added += untrackedFiles;
 
     // Always show changes, even if zero
     // Return object with separate parts for coloring
@@ -264,11 +388,12 @@ function getGitChanges() {
  * Get git remote status (ahead/behind)
  * Always returns status, shows ≡ when synced
  */
-function getGitRemoteStatus() {
+function getGitRemoteStatus(workspaceDir) {
   try {
     const result = execSync('git rev-list --left-right --count HEAD...@{u}', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: workspaceDir,
     }).trim();
 
     const parts = result.split('\t');
@@ -297,11 +422,12 @@ function getGitRemoteStatus() {
 /**
  * Get git branch and status
  */
-function getGitInfo() {
+function getGitInfo(workspaceDir) {
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: workspaceDir,
     }).trim();
 
     if (branch === 'HEAD') {
@@ -333,15 +459,7 @@ function getContextWindowUsage(transcriptPath, modelId) {
     return { text: '', percentage: 0 };
   }
 
-  const contextWindows = {
-    'glm-4.7': 128000,
-    'glm-5': 200000,
-    'glm-5.1': 200000,
-    'claude-3-5-sonnet': 200000,
-    'claude-3-5-opus': 200000,
-    'claude-3-haiku': 200000,
-  };
-
+  const contextWindows = loadModelContextWindows();
   const maxTokens = contextWindows[modelId] || 200000;
 
   try {
@@ -349,6 +467,7 @@ function getContextWindowUsage(transcriptPath, modelId) {
     const lines = content.split('\n').filter(line => line.trim());
 
     let lastInputTokens = 0;
+    let foundUsage = false;
 
     // Find the last assistant message with usage data
     for (const line of lines) {
@@ -358,11 +477,21 @@ function getContextWindowUsage(transcriptPath, modelId) {
           const usage = entry.message.usage;
           // Total input includes actual input + cache read
           lastInputTokens = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+          foundUsage = true;
         }
       }
       catch {
         continue;
       }
+    }
+
+    // Return cached value if no usage data found yet
+    if (!foundUsage || lastInputTokens === 0) {
+      const cached = loadContextCache(transcriptPath);
+      if (cached) {
+        return cached;
+      }
+      return { text: '', percentage: 0 };
     }
 
     const percentage = parseFloat(((lastInputTokens / maxTokens) * 100).toFixed(1));
@@ -371,12 +500,22 @@ function getContextWindowUsage(transcriptPath, modelId) {
     const formatUsed = lastInputTokens >= 1000 ? `${(lastInputTokens / 1000).toFixed(1)}K` : `${lastInputTokens}`;
     const formatMax = maxTokens >= 1000 ? `${(maxTokens / 1000).toFixed(0)}K` : `${maxTokens}`;
 
-    return {
+    const result = {
       text: `${formatUsed}/${formatMax}(${percentage.toFixed(1)}%)`,
       percentage,
     };
+
+    // Update cache
+    saveContextCache(transcriptPath, result);
+
+    return result;
   }
   catch {
+    // Return cached value on error
+    const cached = loadContextCache(transcriptPath);
+    if (cached) {
+      return cached;
+    }
     return { text: '', percentage: 0 };
   }
 }
@@ -418,33 +557,19 @@ function calculateTotalTokens(transcriptPath) {
 
 /**
  * Calculate cost from token usage
- * Simple pricing model (USD per million tokens)
+ * Reads transcript file directly and applies pricing from settings.json
  */
 function calculateCost(transcriptPath) {
   if (!fs.existsSync(transcriptPath)) {
     return null;
   }
 
-  // Pricing per million tokens (adjust as needed)
-  const pricing = {
-    'glm-4.7': { input: 0.15, output: 0.60, cache: 0.015 },
-    'glm-5': { input: 0.20, output: 0.80, cache: 0.02 },
-    'glm-5.1': { input: 0.20, output: 0.80, cache: 0.02 },
-    'claude-3-5-sonnet': { input: 3.00, output: 15.00, cache: 0.30 },
-    'claude-3-5-opus': { input: 15.00, output: 75.00, cache: 1.50 },
-    'claude-3-haiku': { input: 0.25, output: 1.25, cache: 0.03 },
-  };
-
-  const defaultPricing = { input: 1.00, output: 5.00, cache: 0.10 };
-
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const lines = content.split('\n').filter(line => line.trim());
 
-    let totalInput = 0;
-    let totalOutput = 0;
-    let totalCacheRead = 0;
-    let totalCacheCreation = 0;
+    // Track token usage and models used
+    const modelUsage = {}; // { modelId: { input, output, cacheRead, cacheCreation } }
 
     for (const line of lines) {
       try {
@@ -452,10 +577,22 @@ function calculateCost(transcriptPath) {
         const usage = entry.message?.usage || entry.usage;
 
         if (usage) {
-          totalInput += usage.input_tokens || 0;
-          totalOutput += usage.output_tokens || 0;
-          totalCacheRead += usage.cache_read_input_tokens || 0;
-          totalCacheCreation += usage.cache_creation_input_tokens || 0;
+          // Get model ID for this entry
+          let modelId = entry.model || entry.message?.model || 'glm-5.1';
+
+          if (!modelUsage[modelId]) {
+            modelUsage[modelId] = {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheCreation: 0,
+            };
+          }
+
+          modelUsage[modelId].input += usage.input_tokens || 0;
+          modelUsage[modelId].output += usage.output_tokens || 0;
+          modelUsage[modelId].cacheRead += usage.cache_read_input_tokens || 0;
+          modelUsage[modelId].cacheCreation += usage.cache_creation_input_tokens || 0;
         }
       }
       catch {
@@ -463,34 +600,35 @@ function calculateCost(transcriptPath) {
       }
     }
 
-    // Detect model from transcript
-    let modelId = 'glm-5.1';
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        if (entry.model && typeof entry.model === 'string') {
-          modelId = entry.model;
-          break;
-        }
-        if (entry.message?.model) {
-          modelId = entry.message.model;
-          break;
-        }
+    // Calculate cost per model
+    const pricing = loadPricing();
+    const costsByCurrency = {};
+
+    for (const [modelId, usage] of Object.entries(modelUsage)) {
+      const price = pricing[modelId] || pricing['glm-5.1'] || { input: 4, output: 18, cache: 1, currency: 'CNY' };
+      const currency = price.currency || 'USD';
+
+      if (!costsByCurrency[currency]) {
+        costsByCurrency[currency] = 0;
       }
-      catch {
-        continue;
-      }
+
+      costsByCurrency[currency] += (usage.input * price.input / 1_000_000)
+        + (usage.output * price.output / 1_000_000)
+        + (usage.cacheRead * price.cache / 1_000_000)
+        + (usage.cacheCreation * price.cache / 1_000_000);
     }
 
-    const price = pricing[modelId] || defaultPricing;
+    // Return the primary currency cost
+    const currencies = Object.keys(costsByCurrency);
+    if (currencies.length === 0) {
+      return null;
+    }
 
-    // Calculate cost (USD)
-    const cost = (totalInput * price.input / 1_000_000)
-      + (totalOutput * price.output / 1_000_000)
-      + (totalCacheRead * price.cache / 1_000_000)
-      + (totalCacheCreation * price.cache / 1_000_000);
-
-    return cost;
+    const primaryCurrency = currencies[0];
+    return {
+      amount: costsByCurrency[primaryCurrency],
+      currency: primaryCurrency,
+    };
   }
   catch {
     return null;
@@ -546,6 +684,7 @@ function buildStatusLine(input) {
   const config = loadConfig();
   const parts = [];
   const transcriptPath = input?.transcript_path;
+  const workspaceDir = input?.workspace?.current_dir || process.cwd();
 
   // 1. Directory
   if (config.fields.dir) {
@@ -557,7 +696,7 @@ function buildStatusLine(input) {
 
   // 2. Git branch
   if (config.fields.git) {
-    const gitInfo = getGitInfo();
+    const gitInfo = getGitInfo(workspaceDir);
     if (gitInfo.branch) {
       const statusIcon = gitInfo.dirty ? ICONS.gitDirty : ICONS.gitClean;
       const branchColor = gitInfo.dirty ? colors.brightRed : colorConfig.git;
@@ -567,13 +706,13 @@ function buildStatusLine(input) {
 
   // 3. Git remote status
   if (config.fields.remote) {
-    const remoteStatus = getGitRemoteStatus();
+    const remoteStatus = getGitRemoteStatus(workspaceDir);
     parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
   }
 
   // 4. Code changes
   if (config.fields.changes) {
-    const changes = getGitChanges();
+    const changes = getGitChanges(workspaceDir);
     parts.push(`${colors.green}${changes.added}${colors.reset} ${colors.red}${changes.removed}${colors.reset}`);
   }
 
@@ -622,16 +761,30 @@ function buildStatusLine(input) {
   // 9. Cost
   if (config.fields.cost && transcriptPath) {
     let cost = null;
+    let currency = 'USD';
+
     if (input?.cost?.usd !== undefined) {
       cost = input.cost.usd;
+      currency = 'USD';
     }
     else {
-      cost = calculateCost(transcriptPath);
+      const costResult = calculateCost(transcriptPath);
+      if (costResult) {
+        // Handle both old format (number) and new format (object)
+        if (typeof costResult === 'object') {
+          cost = costResult.amount;
+          currency = costResult.currency || 'USD';
+        }
+        else {
+          cost = costResult;
+        }
+      }
     }
 
     if (cost !== null && !isNaN(cost) && cost > 0) {
       const costStr = cost.toFixed(2);
-      parts.push(`${colorConfig.label}$:${colors.reset} ${colorConfig.cost}${costStr}${colors.reset}`);
+      const currencySymbol = currency === 'CNY' ? '¥' : '$';
+      parts.push(`${colorConfig.label}${currencySymbol}:${colors.reset} ${colorConfig.cost}${costStr}${colors.reset}`);
     }
   }
 

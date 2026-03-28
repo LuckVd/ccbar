@@ -1,0 +1,17 @@
+{
+  "_comment": "ccbar 显示字段配置文件",
+  "_location": "放置位置: ~/.claude/ccbar/config.json",
+  "fields": {
+    "_comment": "控制显示哪些字段，true=显示，false=隐藏",
+    "dir": true,
+    "git": true,
+    "remote": true,
+    "changes": true,
+    "duration": true,
+    "context": true,
+    "model": true,
+    "token": true,
+    "cost": true
+  },
+  "separator": " | "
+}
