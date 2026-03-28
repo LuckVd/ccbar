@@ -90,6 +90,80 @@ function getDirName(input) {
 }
 
 /**
+ * Get session duration from transcript timestamps
+ */
+function getSessionDuration(transcriptPath) {
+  if (!fs.existsSync(transcriptPath)) {
+    return null;
+  }
+
+  try {
+    const content = fs.readFileSync(transcriptPath, 'utf-8');
+    const lines = content.split('\n').filter(line => line.trim());
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    let firstTime = null;
+    let lastTime = null;
+
+    // Get first timestamp
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.timestamp) {
+          firstTime = new Date(entry.timestamp);
+          break;
+        }
+      }
+      catch {
+        continue;
+      }
+    }
+
+    // Get last timestamp
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.timestamp) {
+          lastTime = new Date(entry.timestamp);
+          break;
+        }
+      }
+      catch {
+        continue;
+      }
+    }
+
+    if (!firstTime || !lastTime) {
+      return null;
+    }
+
+    const diffMs = lastTime - firstTime;
+    const diffSeconds = diffMs / 1000;
+    const diffMinutes = diffSeconds / 60;
+    const diffHours = diffMinutes / 60;
+
+    // Format: 2h 15m or 45m or 30s
+    if (diffHours >= 1) {
+      const h = Math.floor(diffHours);
+      const m = Math.floor(diffMinutes % 60);
+      return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    }
+    else if (diffMinutes >= 1) {
+      return `${Math.floor(diffMinutes)}m`;
+    }
+    else {
+      return `${Math.floor(diffSeconds)}s`;
+    }
+  }
+  catch {
+    return null;
+  }
+}
+
+/**
  * Get git file changes (added/removed lines)
  */
 function getGitChanges() {
@@ -458,8 +532,16 @@ function buildStatusLine(input) {
   const changes = getGitChanges();
   parts.push(`${colors.green}${changes.added}${colors.reset} ${colors.red}${changes.removed}${colors.reset}`);
 
-  // 3. Context window usage with dynamic color
+  // 2.7. Session duration
   const transcriptPath = input?.transcript_path;
+  if (transcriptPath) {
+    const duration = getSessionDuration(transcriptPath);
+    if (duration) {
+      parts.push(`${colors.brightWhite}⏱${colors.reset} ${duration}`);
+    }
+  }
+
+  // 3. Context window usage with dynamic color
   if (transcriptPath) {
     const modelId = input?.model?.id || 'glm-4.7';
     const contextInfo = getContextWindowUsage(transcriptPath, modelId);
