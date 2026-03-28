@@ -1,0 +1,21 @@
+{
+  "name": "claude-token-accumulator",
+  "version": "1.0.0",
+  "description": "Session token accumulator for Claude Code CLI - displays total tokens used in millions",
+  "type": "commonjs",
+  "main": "src/token-accumulator.cjs",
+  "bin": {
+    "claude-token-acc": "src/token-accumulator.cjs"
+  },
+  "scripts": {
+    "test": "node src/token-accumulator.cjs --help"
+  },
+  "keywords": [
+    "claude-code",
+    "token",
+    "accumulator",
+    "statusline"
+  ],
+  "author": "",
+  "license": "MIT"
+}
