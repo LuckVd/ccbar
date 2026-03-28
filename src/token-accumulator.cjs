@@ -129,11 +129,8 @@ function getGitChanges() {
       }
     }
 
-    if (added === 0 && removed === 0) {
-      return '';
-    }
-
-    // Format: +123 -45 or +1.2K -0.5K
+    // Always show changes, even if zero
+    // Format: +123 -45 or +1.2K -0.5K or +0 -0
     const formatNum = (num) => {
       if (num >= 1000) return `+${(num / 1000).toFixed(1)}K`;
       return `+${num}`;
@@ -143,19 +140,16 @@ function getGitChanges() {
       return `-${num}`;
     };
 
-    return added > 0 && removed > 0
-      ? `${formatNum(added)} ${formatRemoved(removed)}`
-      : added > 0
-        ? formatNum(added)
-        : formatRemoved(removed);
+    return `${formatNum(added)} ${formatRemoved(removed)}`;
   }
   catch {
-    return '';
+    return '+0 -0';
   }
 }
 
 /**
  * Get git remote status (ahead/behind)
+ * Always returns status, shows ≡ when synced
  */
 function getGitRemoteStatus() {
   try {
@@ -166,14 +160,14 @@ function getGitRemoteStatus() {
 
     const parts = result.split('\t');
     if (parts.length !== 2) {
-      return '';
+      return '≡';
     }
 
     const ahead = parseInt(parts[1]) || 0;
     const behind = parseInt(parts[0]) || 0;
 
     if (ahead === 0 && behind === 0) {
-      return '';
+      return '≡';
     }
 
     const status = [];
@@ -183,7 +177,7 @@ function getGitRemoteStatus() {
     return status.join(' ');
   }
   catch {
-    return '';
+    return '≡';
   }
 }
 
@@ -455,15 +449,11 @@ function buildStatusLine(input) {
 
   // 2.5. Git remote status (ahead/behind)
   const remoteStatus = getGitRemoteStatus();
-  if (remoteStatus) {
-    parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
-  }
+  parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
 
   // 2.6. Code changes (added/removed lines)
   const changes = getGitChanges();
-  if (changes) {
-    parts.push(`${colors.green}${changes}${colors.reset}`);
-  }
+  parts.push(`${colors.green}${changes}${colors.reset}`);
 
   // 3. Context window usage with dynamic color
   const transcriptPath = input?.transcript_path;

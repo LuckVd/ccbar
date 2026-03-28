@@ -1,21 +1,34 @@
 {
-  "name": "claude-token-accumulator",
+  "name": "ccbar",
   "version": "1.0.0",
-  "description": "Session token accumulator for Claude Code CLI - displays total tokens used in millions",
+  "description": "Claude Code Status Bar - Real-time session info, token usage & git status",
   "type": "commonjs",
   "main": "src/token-accumulator.cjs",
   "bin": {
-    "claude-token-acc": "src/token-accumulator.cjs"
+    "ccbar": "src/token-accumulator.cjs"
   },
   "scripts": {
     "test": "node src/token-accumulator.cjs --help"
   },
   "keywords": [
     "claude-code",
+    "statusline",
     "token",
-    "accumulator",
-    "statusline"
+    "usage",
+    "git",
+    "cli"
   ],
-  "author": "",
-  "license": "MIT"
+  "author": "LuckVd",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LuckVd/ccbar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LuckVd/ccbar/issues"
+  },
+  "homepage": "https://github.com/LuckVd/ccbar#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  }
 }
