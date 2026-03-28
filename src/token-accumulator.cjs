@@ -19,6 +19,42 @@ const path = require('node:path');
 const os = require('node:os');
 const { execSync } = require('node:child_process');
 
+/**
+ * Load configuration from file
+ * Config location: ~/.claude/ccbar/config.json
+ */
+function loadConfig() {
+  const configPath = path.join(os.homedir(), '.claude', 'ccbar', 'config.json');
+
+  // Default configuration (all fields enabled)
+  const defaultConfig = {
+    fields: {
+      dir: true,
+      git: true,
+      remote: true,
+      changes: true,
+      duration: true,
+      context: true,
+      model: true,
+      token: true,
+      cost: true,
+    },
+    separator: ' | ',
+  };
+
+  if (!fs.existsSync(configPath)) {
+    return defaultConfig;
+  }
+
+  try {
+    const userConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    return { ...defaultConfig, ...userConfig };
+  }
+  catch {
+    return defaultConfig;
+  }
+}
+
 // ANSI color codes
 const colors = {
   reset: '\x1b[0m',
@@ -504,49 +540,56 @@ function getModelDisplay(modelId, input) {
 }
 
 /**
- * Build statusline output with colors
- * Format: dir | branch | context | model | tokens
+ * Build statusline output with configurable fields
  */
 function buildStatusLine(input) {
+  const config = loadConfig();
   const parts = [];
-
-  // 1. Directory with icon
-  const dirName = getDirName(input);
-  if (dirName) {
-    parts.push(`${colorConfig.dir}${ICONS.dir} ${dirName}${colors.reset}`);
-  }
-
-  // 2. Git branch with icon
-  const gitInfo = getGitInfo();
-  if (gitInfo.branch) {
-    const statusIcon = gitInfo.dirty ? ICONS.gitDirty : ICONS.gitClean;
-    const branchColor = gitInfo.dirty ? colors.brightRed : colorConfig.git;
-    parts.push(`${branchColor}${ICONS.git} ${gitInfo.branch}${statusIcon}${colors.reset}`);
-  }
-
-  // 2.5. Git remote status (ahead/behind)
-  const remoteStatus = getGitRemoteStatus();
-  parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
-
-  // 2.6. Code changes (added/removed lines) with separate colors
-  const changes = getGitChanges();
-  parts.push(`${colors.green}${changes.added}${colors.reset} ${colors.red}${changes.removed}${colors.reset}`);
-
-  // 2.7. Session duration
   const transcriptPath = input?.transcript_path;
-  if (transcriptPath) {
+
+  // 1. Directory
+  if (config.fields.dir) {
+    const dirName = getDirName(input);
+    if (dirName) {
+      parts.push(`${colorConfig.dir}${ICONS.dir} ${dirName}${colors.reset}`);
+    }
+  }
+
+  // 2. Git branch
+  if (config.fields.git) {
+    const gitInfo = getGitInfo();
+    if (gitInfo.branch) {
+      const statusIcon = gitInfo.dirty ? ICONS.gitDirty : ICONS.gitClean;
+      const branchColor = gitInfo.dirty ? colors.brightRed : colorConfig.git;
+      parts.push(`${branchColor}${ICONS.git} ${gitInfo.branch}${statusIcon}${colors.reset}`);
+    }
+  }
+
+  // 3. Git remote status
+  if (config.fields.remote) {
+    const remoteStatus = getGitRemoteStatus();
+    parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
+  }
+
+  // 4. Code changes
+  if (config.fields.changes) {
+    const changes = getGitChanges();
+    parts.push(`${colors.green}${changes.added}${colors.reset} ${colors.red}${changes.removed}${colors.reset}`);
+  }
+
+  // 5. Session duration
+  if (config.fields.duration && transcriptPath) {
     const duration = getSessionDuration(transcriptPath);
     if (duration) {
       parts.push(`${colors.brightWhite}⏱${colors.reset} ${duration}`);
     }
   }
 
-  // 3. Context window usage with dynamic color
-  if (transcriptPath) {
+  // 6. Context window usage
+  if (config.fields.context && transcriptPath) {
     const modelId = input?.model?.id || 'glm-4.7';
     const contextInfo = getContextWindowUsage(transcriptPath, modelId);
     if (contextInfo.text) {
-      // Choose color based on percentage
       let contextColor;
       if (contextInfo.percentage < 50) {
         contextColor = colors.green;
@@ -561,37 +604,38 @@ function buildStatusLine(input) {
     }
   }
 
-  // 4. Model name
-  if (transcriptPath) {
+  // 7. Model name
+  if (config.fields.model && transcriptPath) {
     const modelId = input?.model?.id || 'glm-4.7';
     const modelDisplay = getModelDisplay(modelId, input);
     if (modelDisplay) {
-      parts.push(`${colorConfig.label}M:${colors.reset} ${colorConfig.model}${modelDisplay}${colors.reset}`);
+      parts.push(`M: ${modelDisplay}`);
     }
   }
 
-  // 5. Total session tokens
-  if (transcriptPath) {
+  // 8. Total session tokens
+  if (config.fields.token && transcriptPath) {
     const totalTokens = calculateTotalTokens(transcriptPath);
     parts.push(`${colorConfig.label}T:${colors.reset} ${colorConfig.token}${formatTokens(totalTokens)}${colors.reset}`);
   }
 
-  // 6. Cost (calculated from tokens or from input)
-  let cost = null;
-  if (input?.cost?.usd !== undefined) {
-    cost = input.cost.usd;
-  }
-  else if (transcriptPath) {
-    // Calculate cost from token usage
-    cost = calculateCost(transcriptPath);
+  // 9. Cost
+  if (config.fields.cost && transcriptPath) {
+    let cost = null;
+    if (input?.cost?.usd !== undefined) {
+      cost = input.cost.usd;
+    }
+    else {
+      cost = calculateCost(transcriptPath);
+    }
+
+    if (cost !== null && !isNaN(cost) && cost > 0) {
+      const costStr = cost.toFixed(2);
+      parts.push(`${colorConfig.label}$:${colors.reset} ${colorConfig.cost}${costStr}${colors.reset}`);
+    }
   }
 
-  if (cost !== null && !isNaN(cost) && cost > 0) {
-    const costStr = cost.toFixed(2);
-    parts.push(`${colorConfig.label}$:${colors.reset} ${colorConfig.cost}${costStr}${colors.reset}`);
-  }
-
-  return parts.join(ICONS.separator);
+  return parts.join(config.separator);
 }
 
 /**
