@@ -130,7 +130,7 @@ function getGitChanges() {
     }
 
     // Always show changes, even if zero
-    // Format: +123 -45 or +1.2K -0.5K or +0 -0
+    // Return object with separate parts for coloring
     const formatNum = (num) => {
       if (num >= 1000) return `+${(num / 1000).toFixed(1)}K`;
       return `+${num}`;
@@ -140,10 +140,13 @@ function getGitChanges() {
       return `-${num}`;
     };
 
-    return `${formatNum(added)} ${formatRemoved(removed)}`;
+    return {
+      added: formatNum(added),
+      removed: formatRemoved(removed),
+    };
   }
   catch {
-    return '+0 -0';
+    return { added: '+0', removed: '-0' };
   }
 }
 
@@ -451,9 +454,9 @@ function buildStatusLine(input) {
   const remoteStatus = getGitRemoteStatus();
   parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
 
-  // 2.6. Code changes (added/removed lines)
+  // 2.6. Code changes (added/removed lines) with separate colors
   const changes = getGitChanges();
-  parts.push(`${colors.green}${changes}${colors.reset}`);
+  parts.push(`${colors.green}${changes.added}${colors.reset} ${colors.red}${changes.removed}${colors.reset}`);
 
   // 3. Context window usage with dynamic color
   const transcriptPath = input?.transcript_path;
