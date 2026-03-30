@@ -497,23 +497,21 @@ function getGitChanges(workspaceDir) {
     added += untrackedFiles;
 
     // Always show changes, even if zero
-    // Return object with separate parts for coloring
+    // Return colored strings directly
     const formatNum = (num) => {
-      if (num >= 1000) return `+${(num / 1000).toFixed(1)}K`;
-      return `+${num}`;
+      if (num >= 1000) return `${colors.green}+${(num / 1000).toFixed(1)}K${colors.reset}`;
+      return `${colors.green}+${num}${colors.reset}`;
     };
     const formatRemoved = (num) => {
-      if (num >= 1000) return `-${(num / 1000).toFixed(1)}K`;
-      return `-${num}`;
+      // Use bright red for removed lines
+      if (num >= 1000) return `${colors.brightRed}-${(num / 1000).toFixed(1)}K${colors.reset}`;
+      return `${colors.brightRed}-${num}${colors.reset}`;
     };
 
-    return {
-      added: formatNum(added),
-      removed: formatRemoved(removed),
-    };
+    return `${formatNum(added)} ${formatRemoved(removed)}`;
   }
   catch {
-    return { added: '+0', removed: '-0' };
+    return `${colors.green}+0${colors.reset} ${colors.brightRed}-0${colors.reset}`;
   }
 }
 
@@ -701,7 +699,10 @@ function calculateTotalTokens(transcriptPath, workspaceDir) {
 
   // Update history
   project.totalTokens += newTokens;
-  project.processedFiles[transcriptPath] = { lines: lines.length };
+  if (!project.processedFiles[transcriptPath]) {
+    project.processedFiles[transcriptPath] = {};
+  }
+  project.processedFiles[transcriptPath].lines = lines.length;
   project.lastUpdated = new Date().toISOString();
 
   saveTokenHistory(history);
@@ -788,12 +789,10 @@ function calculateCost(transcriptPath, workspaceDir) {
 
     // Return the primary currency cost
     const currencies = Object.keys(costsByCurrency);
-    if (currencies.length === 0 && project.totalCost) {
-      return project.totalCost;
-    }
 
     if (currencies.length === 0) {
-      return null;
+      // No new usage data in this transcript, return existing accumulated cost
+      return project.totalCost;
     }
 
     const primaryCurrency = currencies[0];
@@ -901,8 +900,7 @@ function buildStatusLine(input) {
 
   // 4. Code changes
   if (config.fields.changes) {
-    const changes = getGitChanges(workspaceDir);
-    parts.push(`${colors.green}${changes.added}${colors.reset} ${colors.red}${changes.removed}${colors.reset}`);
+    parts.push(getGitChanges(workspaceDir));
   }
 
   // 5. Session duration
