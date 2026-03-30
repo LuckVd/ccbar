@@ -22,6 +22,9 @@ const { execSync } = require('node:child_process');
 // Cache directory for persisting data between invocations
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ccbar', 'cache');
 
+// Token history file path for cross-session accumulation
+const TOKEN_HISTORY_PATH = path.join(os.homedir(), '.claude', 'ccbar', 'token-history.json');
+
 /**
  * Ensure cache directory exists
  */
@@ -69,6 +72,76 @@ function saveContextCache(transcriptPath, data) {
   catch {
     // Ignore cache errors
   }
+}
+
+/**
+ * Get token history file path, ensuring directory exists
+ */
+function getTokenHistoryPath() {
+  const dir = path.dirname(TOKEN_HISTORY_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return TOKEN_HISTORY_PATH;
+}
+
+/**
+ * Load token history for cross-session accumulation
+ * Returns object with { projects: { projectPath: { totalTokens, totalCost, processedFiles, lastUpdated } } }
+ */
+function loadTokenHistory() {
+  try {
+    if (fs.existsSync(TOKEN_HISTORY_PATH)) {
+      const data = fs.readFileSync(TOKEN_HISTORY_PATH, 'utf-8');
+      const parsed = JSON.parse(data);
+      // Ensure projects object exists
+      if (!parsed.projects) {
+        parsed.projects = {};
+      }
+      return parsed;
+    }
+  }
+  catch {
+    // Ignore errors and return default
+  }
+  return { projects: {} };
+}
+
+/**
+ * Save token history
+ */
+function saveTokenHistory(history) {
+  try {
+    const historyPath = getTokenHistoryPath();
+    fs.writeFileSync(historyPath, JSON.stringify(history, null, 2), 'utf-8');
+  }
+  catch {
+    // Ignore errors
+  }
+}
+
+/**
+ * Get project key for token history isolation
+ * Uses the current working directory or workspace directory
+ */
+function getProjectKey(workspaceDir) {
+  return workspaceDir || process.cwd();
+}
+
+/**
+ * Get or create project entry in token history
+ */
+function getProjectEntry(history, projectKey) {
+  if (!history.projects[projectKey]) {
+    history.projects[projectKey] = {
+      totalTokens: 0,
+      totalCost: null,
+      totalDurationMs: 0,
+      processedFiles: {},
+      lastUpdated: new Date().toISOString(),
+    };
+  }
+  return history.projects[projectKey];
 }
 
 /**
@@ -237,31 +310,33 @@ function getDirName(input) {
 }
 
 /**
- * Get session duration from transcript timestamps
+ * Get session duration from transcript timestamps with cross-session accumulation
+ * Only counts active time between messages (gaps > 10 minutes are considered idle)
  */
-function getSessionDuration(transcriptPath) {
+function getSessionDuration(transcriptPath, workspaceDir) {
   if (!fs.existsSync(transcriptPath)) {
     return null;
   }
+
+  const projectKey = getProjectKey(workspaceDir);
+  const history = loadTokenHistory();
+  const project = getProjectEntry(history, projectKey);
 
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const lines = content.split('\n').filter(line => line.trim());
 
     if (lines.length === 0) {
-      return null;
+      return formatDuration(project.totalDurationMs || 0);
     }
 
-    let firstTime = null;
-    let lastTime = null;
-
-    // Get first timestamp
+    // Collect all timestamps
+    const timestamps = [];
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
         if (entry.timestamp) {
-          firstTime = new Date(entry.timestamp);
-          break;
+          timestamps.push(new Date(entry.timestamp));
         }
       }
       catch {
@@ -269,44 +344,102 @@ function getSessionDuration(transcriptPath) {
       }
     }
 
-    // Get last timestamp
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (entry.timestamp) {
-          lastTime = new Date(entry.timestamp);
-          break;
-        }
+    if (timestamps.length < 2) {
+      return formatDuration(project.totalDurationMs || 0);
+    }
+
+    // Sort timestamps
+    timestamps.sort((a, b) => a - b);
+
+    // Calculate active time: sum gaps between consecutive messages
+    // Only count gaps <= 1 hour as active time
+    const IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
+    let activeTimeMs = 0;
+    for (let i = 1; i < timestamps.length; i++) {
+      const gap = timestamps[i] - timestamps[i - 1];
+      if (gap <= IDLE_THRESHOLD_MS) {
+        activeTimeMs += gap;
       }
-      catch {
-        continue;
+    }
+
+    // Also count the time from first to last message in each active block
+    // Find continuous blocks of messages (where gaps <= threshold)
+    let blockStart = timestamps[0];
+    let blockEnd = timestamps[0];
+
+    for (let i = 1; i < timestamps.length; i++) {
+      const gap = timestamps[i] - timestamps[i - 1];
+      if (gap <= IDLE_THRESHOLD_MS) {
+        // Still in active block
+        blockEnd = timestamps[i];
+      }
+      else {
+        // End of active block, add its duration
+        activeTimeMs += (blockEnd - blockStart);
+        // Start new block
+        blockStart = timestamps[i];
+        blockEnd = timestamps[i];
       }
     }
+    // Add the last block
+    activeTimeMs += (blockEnd - blockStart);
 
-    if (!firstTime || !lastTime) {
-      return null;
+    // Round to seconds to avoid tiny fractions
+    activeTimeMs = Math.round(activeTimeMs / 1000) * 1000;
+
+    // Check if we've already calculated duration for this file
+    const fileInfo = project.processedFiles[transcriptPath];
+
+    // If this is a new file or duration has changed, update history
+    if (!fileInfo || fileInfo.durationMs !== activeTimeMs || fileInfo.lines !== lines.length) {
+      // Remove old duration if it existed
+      const oldDuration = fileInfo?.durationMs || 0;
+
+      // Recalculate total: previous total - old file duration + new file duration
+      project.totalDurationMs = (project.totalDurationMs || 0) - oldDuration + activeTimeMs;
+
+      // Update file info
+      if (!project.processedFiles[transcriptPath]) {
+        project.processedFiles[transcriptPath] = {};
+      }
+      project.processedFiles[transcriptPath].durationMs = activeTimeMs;
+      project.processedFiles[transcriptPath].lines = lines.length;
+      project.lastUpdated = new Date().toISOString();
+
+      saveTokenHistory(history);
     }
 
-    const diffMs = lastTime - firstTime;
-    const diffSeconds = diffMs / 1000;
-    const diffMinutes = diffSeconds / 60;
-    const diffHours = diffMinutes / 60;
-
-    // Format: 2h 15m or 45m or 30s
-    if (diffHours >= 1) {
-      const h = Math.floor(diffHours);
-      const m = Math.floor(diffMinutes % 60);
-      return m > 0 ? `${h}h ${m}m` : `${h}h`;
-    }
-    else if (diffMinutes >= 1) {
-      return `${Math.floor(diffMinutes)}m`;
-    }
-    else {
-      return `${Math.floor(diffSeconds)}s`;
-    }
+    return formatDuration(project.totalDurationMs || 0);
   }
   catch {
+    return formatDuration(project.totalDurationMs || 0);
+  }
+}
+
+/**
+ * Format duration in milliseconds to human-readable string
+ */
+function formatDuration(ms) {
+  if (ms <= 0) {
     return null;
+  }
+
+  const diffSeconds = ms / 1000;
+  const diffMinutes = diffSeconds / 60;
+  const diffHours = diffMinutes / 60;
+
+  // Format: 2h 15m or 45m or 30s
+  if (diffHours >= 1) {
+    const h = Math.floor(diffHours);
+    const m = Math.floor(diffMinutes % 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  else if (diffMinutes >= 1) {
+    return `${Math.floor(diffMinutes)}m`;
+  }
+  else {
+    return `${Math.floor(diffSeconds)}s`;
   }
 }
 
@@ -521,22 +654,36 @@ function getContextWindowUsage(transcriptPath, modelId) {
 }
 
 /**
- * Calculate total session tokens
+ * Calculate total session tokens with cross-session accumulation
  * Includes: input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
+ * Now persists across /clear commands
  */
-function calculateTotalTokens(transcriptPath) {
+function calculateTotalTokens(transcriptPath, workspaceDir) {
   if (!fs.existsSync(transcriptPath)) {
     return 0;
   }
 
+  const projectKey = getProjectKey(workspaceDir);
+  const history = loadTokenHistory();
+  const project = getProjectEntry(history, projectKey);
+
   const content = fs.readFileSync(transcriptPath, 'utf-8');
   const lines = content.split('\n').filter(line => line.trim());
 
-  let total = 0;
+  // Check how many lines we've already processed for this transcript
+  const lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
+  const newLinesCount = lines.length - lastProcessedLines;
 
-  for (const line of lines) {
+  // If no new lines, return accumulated total
+  if (newLinesCount <= 0) {
+    return project.totalTokens;
+  }
+
+  // Calculate only new tokens
+  let newTokens = 0;
+  for (let i = lastProcessedLines; i < lines.length; i++) {
     try {
-      const entry = JSON.parse(line);
+      const entry = JSON.parse(lines[i]);
       const usage = entry.message?.usage || entry.usage;
 
       if (usage) {
@@ -544,7 +691,7 @@ function calculateTotalTokens(transcriptPath) {
           + (usage.cache_read_input_tokens || 0)
           + (usage.cache_creation_input_tokens || 0);
         const output = usage.output_tokens || 0;
-        total += input + output;
+        newTokens += input + output;
       }
     }
     catch {
@@ -552,28 +699,49 @@ function calculateTotalTokens(transcriptPath) {
     }
   }
 
-  return total;
+  // Update history
+  project.totalTokens += newTokens;
+  project.processedFiles[transcriptPath] = { lines: lines.length };
+  project.lastUpdated = new Date().toISOString();
+
+  saveTokenHistory(history);
+
+  return project.totalTokens;
 }
 
 /**
- * Calculate cost from token usage
+ * Calculate cost from token usage with cross-session accumulation
  * Reads transcript file directly and applies pricing from settings.json
+ * Now persists across /clear commands
  */
-function calculateCost(transcriptPath) {
+function calculateCost(transcriptPath, workspaceDir) {
   if (!fs.existsSync(transcriptPath)) {
     return null;
   }
+
+  const projectKey = getProjectKey(workspaceDir);
+  const history = loadTokenHistory();
+  const project = getProjectEntry(history, projectKey);
 
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const lines = content.split('\n').filter(line => line.trim());
 
-    // Track token usage and models used
+    // Check how many lines we've already processed for this transcript
+    const lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
+    const newLinesCount = lines.length - lastProcessedLines;
+
+    // If no new lines, return accumulated cost
+    if (newLinesCount <= 0 && project.totalCost) {
+      return project.totalCost;
+    }
+
+    // Track token usage and models used (only new lines)
     const modelUsage = {}; // { modelId: { input, output, cacheRead, cacheCreation } }
 
-    for (const line of lines) {
+    for (let i = lastProcessedLines; i < lines.length; i++) {
       try {
-        const entry = JSON.parse(line);
+        const entry = JSON.parse(lines[i]);
         const usage = entry.message?.usage || entry.usage;
 
         if (usage) {
@@ -620,18 +788,39 @@ function calculateCost(transcriptPath) {
 
     // Return the primary currency cost
     const currencies = Object.keys(costsByCurrency);
+    if (currencies.length === 0 && project.totalCost) {
+      return project.totalCost;
+    }
+
     if (currencies.length === 0) {
       return null;
     }
 
     const primaryCurrency = currencies[0];
-    return {
+    const newCost = {
       amount: costsByCurrency[primaryCurrency],
       currency: primaryCurrency,
     };
+
+    // Accumulate with existing cost
+    let currentAmount = project.totalCost?.amount || 0;
+    // Handle currency mismatch by using new cost's currency
+    if (project.totalCost && project.totalCost.currency !== primaryCurrency) {
+      currentAmount = 0; // Reset on currency change
+    }
+
+    project.totalCost = {
+      amount: currentAmount + newCost.amount,
+      currency: primaryCurrency,
+    };
+    project.lastUpdated = new Date().toISOString();
+
+    saveTokenHistory(history);
+
+    return project.totalCost;
   }
   catch {
-    return null;
+    return project.totalCost;
   }
 }
 
@@ -718,7 +907,7 @@ function buildStatusLine(input) {
 
   // 5. Session duration
   if (config.fields.duration && transcriptPath) {
-    const duration = getSessionDuration(transcriptPath);
+    const duration = getSessionDuration(transcriptPath, workspaceDir);
     if (duration) {
       parts.push(`${colors.brightWhite}⏱${colors.reset} ${duration}`);
     }
@@ -754,7 +943,7 @@ function buildStatusLine(input) {
 
   // 8. Total session tokens
   if (config.fields.token && transcriptPath) {
-    const totalTokens = calculateTotalTokens(transcriptPath);
+    const totalTokens = calculateTotalTokens(transcriptPath, workspaceDir);
     parts.push(`${colorConfig.label}T:${colors.reset} ${colorConfig.token}${formatTokens(totalTokens)}${colors.reset}`);
   }
 
@@ -768,7 +957,7 @@ function buildStatusLine(input) {
       currency = 'USD';
     }
     else {
-      const costResult = calculateCost(transcriptPath);
+      const costResult = calculateCost(transcriptPath, workspaceDir);
       if (costResult) {
         // Handle both old format (number) and new format (object)
         if (typeof costResult === 'object') {
@@ -797,12 +986,73 @@ function buildStatusLine(input) {
 function main() {
   const args = process.argv.slice(2);
 
+  // Handle --reset-tokens: reset token history for current or specified project
+  if (args.includes('--reset-tokens')) {
+    const history = loadTokenHistory();
+    const projectKey = getProjectKey(process.cwd());
+
+    if (history.projects[projectKey]) {
+      const { totalTokens, totalCost } = history.projects[projectKey];
+      delete history.projects[projectKey];
+      saveTokenHistory(history);
+
+      console.log(`Token history reset for project: ${projectKey}`);
+      console.log(`Previous totals: ${formatTokens(totalTokens)}${totalCost ? `, ${totalCost.currency} ${totalCost.amount.toFixed(2)}` : ''}`);
+    }
+    else {
+      console.log(`No token history found for project: ${projectKey}`);
+    }
+    process.exit(0);
+  }
+
+  // Handle --reset-all-tokens: reset all token history
+  if (args.includes('--reset-all-tokens')) {
+    const history = loadTokenHistory();
+    const projectCount = Object.keys(history.projects).length;
+    history.projects = {};
+    saveTokenHistory(history);
+
+    console.log(`Token history reset for ${projectCount} project(s)`);
+    process.exit(0);
+  }
+
+  // Handle --show-history: show token history for all projects
+  if (args.includes('--show-history')) {
+    const history = loadTokenHistory();
+    const projects = Object.entries(history.projects);
+
+    if (projects.length === 0) {
+      console.log('No token history found.');
+      process.exit(0);
+    }
+
+    console.log('\nToken History by Project:\n');
+    for (const [projectPath, data] of projects) {
+      const costStr = data.totalCost
+        ? `${data.totalCost.currency} ${data.totalCost.amount.toFixed(2)}`
+        : 'N/A';
+      const durationStr = formatDuration(data.totalDurationMs || 0);
+      console.log(`Project: ${projectPath}`);
+      console.log(`  Tokens: ${formatTokens(data.totalTokens)}`);
+      console.log(`  Cost: ${costStr}`);
+      console.log(`  Duration: ${durationStr || 'N/A'}`);
+      console.log(`  Last Updated: ${data.lastUpdated}`);
+      console.log('');
+    }
+    process.exit(0);
+  }
+
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
-Enhanced StatusLine for Claude Code v2.0.0
+Enhanced StatusLine for Claude Code v2.1.0
 
 USAGE:
   token-accumulator [transcript-path]
+
+OPTIONS:
+  --reset-tokens      Reset token history for current project
+  --reset-all-tokens  Reset token history for all projects
+  --show-history      Show token history for all projects
 
 DISPLAY FORMAT:
   📁dir branch|status 🪟context 🤖model 💰tokens
@@ -812,6 +1062,11 @@ DISPLAY FORMAT:
   - context: Remaining context window (e.g., 128K)
   - model: Model name with icon
   - 💰tokens: Total session tokens in millions (2 decimals)
+
+FEATURES:
+  - Token accumulation persists across /clear commands
+  - Each project has its own token history (isolated by directory)
+  - Use --reset-tokens to reset current project history
 
 EXAMPLE OUTPUT:
   📁zcf main* 🪟128K 🤖GLM-4.7 💰0.37M
