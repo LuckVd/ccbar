@@ -413,8 +413,13 @@ function getSessionDuration(transcriptPath, workspaceDir) {
     // Check if we've already calculated duration for this file
     const fileInfo = project.processedFiles[transcriptPath];
 
-    // If this is a new file or duration has changed, update history
-    if (!fileInfo || fileInfo.durationMs !== activeTimeMs || fileInfo.lines !== lines.length) {
+    // Check if file has grown since last duration calculation
+    // Use lines from fileInfo (updated by calculateTotalTokens) or current file size
+    const recordedLines = fileInfo?.lines || 0;
+    const fileHasGrown = lines.length > recordedLines;
+
+    // If this is a new file or duration has changed or file has grown, update history
+    if (!fileInfo || fileInfo.durationMs !== activeTimeMs || fileHasGrown) {
       // Remove old duration if it existed
       const oldDuration = fileInfo?.durationMs || 0;
 
@@ -426,7 +431,8 @@ function getSessionDuration(transcriptPath, workspaceDir) {
         project.processedFiles[transcriptPath] = {};
       }
       project.processedFiles[transcriptPath].durationMs = activeTimeMs;
-      project.processedFiles[transcriptPath].lines = lines.length;
+      // Don't update 'lines' here - let calculateTotalTokens handle it
+      // to avoid race conditions where duration updates first
       project.lastUpdated = new Date().toISOString();
 
       saveTokenHistory(history);
