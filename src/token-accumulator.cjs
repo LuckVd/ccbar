@@ -691,8 +691,14 @@ function calculateTotalTokens(transcriptPath, workspaceDir) {
   const lines = content.split('\n').filter(line => line.trim());
 
   // Check how many lines we've already processed for this transcript
-  const lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
-  const newLinesCount = lines.length - lastProcessedLines;
+  let lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
+  let newLinesCount = lines.length - lastProcessedLines;
+
+  // If recorded lines exceed actual (file was truncated), recalculate
+  if (newLinesCount < 0) {
+    lastProcessedLines = 0;
+    newLinesCount = lines.length;
+  }
 
   // If no new lines, return accumulated total
   if (newLinesCount <= 0) {
@@ -753,6 +759,12 @@ function calculateCost(transcriptPath, workspaceDir) {
     // Check how many lines we've already processed for this transcript
     let lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
     let newLinesCount = lines.length - lastProcessedLines;
+
+    // If recorded lines exceed actual (file was truncated), recalculate
+    if (newLinesCount < 0) {
+      lastProcessedLines = 0;
+      newLinesCount = lines.length;
+    }
 
     // If no new lines, return accumulated cost
     // But if cost is null (never calculated), recalculate from all lines
