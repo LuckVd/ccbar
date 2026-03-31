@@ -322,10 +322,13 @@ function getStdinInput() {
 
 /**
  * Get current directory name
+ * Uses git root for consistency with project key
  */
 function getDirName(input) {
   const cwd = input?.workspace?.current_dir || process.cwd();
-  return path.basename(cwd);
+  const gitRoot = getGitRoot(cwd);
+  // Use git root basename for consistency with token/cost accumulation
+  return path.basename(gitRoot);
 }
 
 /**
