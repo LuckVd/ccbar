@@ -762,13 +762,15 @@ function calculateCost(transcriptPath, workspaceDir) {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const lines = content.split('\n').filter(line => line.trim());
 
-    // Check how many lines we've already processed for this transcript
-    let lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
-    let newLinesCount = lines.length - lastProcessedLines;
+    // Check how many lines we've already processed for cost calculation
+    // Use separate tracking from 'lines' to avoid race condition with calculateTotalTokens
+    const fileInfo = project.processedFiles[transcriptPath] || {};
+    let lastProcessedCostLines = fileInfo.costCalculatedLines || 0;
+    let newLinesCount = lines.length - lastProcessedCostLines;
 
     // If recorded lines exceed actual (file was truncated), recalculate
     if (newLinesCount < 0) {
-      lastProcessedLines = 0;
+      lastProcessedCostLines = 0;
       newLinesCount = lines.length;
     }
 
@@ -779,15 +781,15 @@ function calculateCost(transcriptPath, workspaceDir) {
         return project.totalCost;
       }
       // Cost was never calculated (e.g., cost field was disabled before)
-      // Recalculate from all lines by setting lastProcessedLines to 0
-      lastProcessedLines = 0;
+      // Recalculate from all lines by setting lastProcessedCostLines to 0
+      lastProcessedCostLines = 0;
       newLinesCount = lines.length;
     }
 
     // Track token usage and models used (only new lines)
     const modelUsage = {}; // { modelId: { input, output, cacheRead, cacheCreation } }
 
-    for (let i = lastProcessedLines; i < lines.length; i++) {
+    for (let i = lastProcessedCostLines; i < lines.length; i++) {
       try {
         const entry = JSON.parse(lines[i]);
         const usage = entry.message?.usage || entry.usage;
@@ -839,12 +841,12 @@ function calculateCost(transcriptPath, workspaceDir) {
 
     if (currencies.length === 0) {
       // No new usage data in this transcript, return existing accumulated cost
-      // Save processedFiles state so we don't reprocess empty lines next time
+      // Save costCalculatedLines state so we don't reprocess empty lines next time
       if (!project.processedFiles[transcriptPath]) {
         project.processedFiles[transcriptPath] = {};
       }
-      if (project.processedFiles[transcriptPath].lines !== lines.length) {
-        project.processedFiles[transcriptPath].lines = lines.length;
+      if (project.processedFiles[transcriptPath].costCalculatedLines !== lines.length) {
+        project.processedFiles[transcriptPath].costCalculatedLines = lines.length;
         saveTokenHistory(history);
       }
       return project.totalCost || null;
@@ -867,11 +869,12 @@ function calculateCost(transcriptPath, workspaceDir) {
       amount: currentAmount + newCost.amount,
       currency: primaryCurrency,
     };
-    // Update processedFiles state
+    // Update processedFiles state - only update costCalculatedLines, not 'lines'
+    // 'lines' is managed by calculateTotalTokens to avoid race conditions
     if (!project.processedFiles[transcriptPath]) {
       project.processedFiles[transcriptPath] = {};
     }
-    project.processedFiles[transcriptPath].lines = lines.length;
+    project.processedFiles[transcriptPath].costCalculatedLines = lines.length;
     project.lastUpdated = new Date().toISOString();
 
     saveTokenHistory(history);
