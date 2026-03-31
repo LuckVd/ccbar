@@ -121,11 +121,30 @@ function saveTokenHistory(history) {
 }
 
 /**
+ * Get git repository root directory
+ * Returns the root of the git repo, or current dir if not in a repo
+ */
+function getGitRoot(workspaceDir) {
+  try {
+    const root = execSync('git rev-parse --show-toplevel', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: workspaceDir,
+    }).trim();
+    return root;
+  }
+  catch {
+    return workspaceDir || process.cwd();
+  }
+}
+
+/**
  * Get project key for token history isolation
- * Uses the current working directory or workspace directory
+ * Uses git repository root to unify data across subdirectories
  */
 function getProjectKey(workspaceDir) {
-  return workspaceDir || process.cwd();
+  const dir = workspaceDir || process.cwd();
+  return getGitRoot(dir);
 }
 
 /**
