@@ -732,9 +732,9 @@ function calculateCost(transcriptPath, workspaceDir) {
     const lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
     const newLinesCount = lines.length - lastProcessedLines;
 
-    // If no new lines, return accumulated cost
-    if (newLinesCount <= 0 && project.totalCost) {
-      return project.totalCost;
+    // If no new lines, return accumulated cost (even if null/not initialized)
+    if (newLinesCount <= 0) {
+      return project.totalCost || null;
     }
 
     // Track token usage and models used (only new lines)
@@ -792,7 +792,15 @@ function calculateCost(transcriptPath, workspaceDir) {
 
     if (currencies.length === 0) {
       // No new usage data in this transcript, return existing accumulated cost
-      return project.totalCost;
+      // Save processedFiles state so we don't reprocess empty lines next time
+      if (!project.processedFiles[transcriptPath]) {
+        project.processedFiles[transcriptPath] = {};
+      }
+      if (project.processedFiles[transcriptPath].lines !== lines.length) {
+        project.processedFiles[transcriptPath].lines = lines.length;
+        saveTokenHistory(history);
+      }
+      return project.totalCost || null;
     }
 
     const primaryCurrency = currencies[0];
