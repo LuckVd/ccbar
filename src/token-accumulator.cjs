@@ -729,12 +729,19 @@ function calculateCost(transcriptPath, workspaceDir) {
     const lines = content.split('\n').filter(line => line.trim());
 
     // Check how many lines we've already processed for this transcript
-    const lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
-    const newLinesCount = lines.length - lastProcessedLines;
+    let lastProcessedLines = project.processedFiles[transcriptPath]?.lines || 0;
+    let newLinesCount = lines.length - lastProcessedLines;
 
-    // If no new lines, return accumulated cost (even if null/not initialized)
+    // If no new lines, return accumulated cost
+    // But if cost is null (never calculated), recalculate from all lines
     if (newLinesCount <= 0) {
-      return project.totalCost || null;
+      if (project.totalCost) {
+        return project.totalCost;
+      }
+      // Cost was never calculated (e.g., cost field was disabled before)
+      // Recalculate from all lines by setting lastProcessedLines to 0
+      lastProcessedLines = 0;
+      newLinesCount = lines.length;
     }
 
     // Track token usage and models used (only new lines)
@@ -820,6 +827,11 @@ function calculateCost(transcriptPath, workspaceDir) {
       amount: currentAmount + newCost.amount,
       currency: primaryCurrency,
     };
+    // Update processedFiles state
+    if (!project.processedFiles[transcriptPath]) {
+      project.processedFiles[transcriptPath] = {};
+    }
+    project.processedFiles[transcriptPath].lines = lines.length;
     project.lastUpdated = new Date().toISOString();
 
     saveTokenHistory(history);
