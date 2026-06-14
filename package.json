@@ -1,5 +1,5 @@
 {
-  "name": "ccbar",
+  "name": "@luckvd/ccbar",
   "version": "1.0.0",
   "description": "Claude Code Status Bar - Real-time session info, token usage & git status",
   "type": "commonjs",
@@ -28,6 +28,18 @@
     "url": "https://github.com/LuckVd/ccbar/issues"
   },
   "homepage": "https://github.com/LuckVd/ccbar#readme",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "ccbar.config.example.json",
+    "settings.example.json"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=14.0.0"
   }

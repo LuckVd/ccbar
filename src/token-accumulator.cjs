@@ -19,6 +19,16 @@ const path = require('node:path');
 const os = require('node:os');
 const { execSync } = require('node:child_process');
 
+// Read version from package.json (parent of src/)
+const PACKAGE_VERSION = (() => {
+  try {
+    return require(path.join(__dirname, '..', 'package.json')).version;
+  }
+  catch {
+    return '0.0.0';
+  }
+})();
+
 // Cache directory for persisting data between invocations
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ccbar', 'cache');
 
@@ -122,20 +132,56 @@ function saveTokenHistory(history) {
 
 /**
  * Get git repository root directory
- * Returns the root of the git repo, or current dir if not in a repo
+ * Returns the root of the git repo, or current dir if not in a repo.
+ * Cached per-directory within a single process invocation (statusline is short-lived,
+ * but several functions call this for the same dir per refresh).
  */
+const gitRootCache = new Map();
+const gitRepoCache = new Map();
+
 function getGitRoot(workspaceDir) {
+  const dir = workspaceDir || process.cwd();
+  if (gitRootCache.has(dir)) {
+    return gitRootCache.get(dir);
+  }
+  let root;
   try {
-    const root = execSync('git rev-parse --show-toplevel', {
+    root = execSync('git rev-parse --show-toplevel', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
-      cwd: workspaceDir,
+      cwd: dir,
     }).trim();
-    return root;
   }
   catch {
-    return workspaceDir || process.cwd();
+    root = dir;
   }
+  gitRootCache.set(dir, root);
+  return root;
+}
+
+/**
+ * Check whether a directory is inside a git work tree.
+ * Cached per-directory within a single process invocation.
+ */
+function isGitRepo(workspaceDir) {
+  const dir = workspaceDir || process.cwd();
+  if (gitRepoCache.has(dir)) {
+    return gitRepoCache.get(dir);
+  }
+  let result;
+  try {
+    execSync('git rev-parse --is-inside-work-tree', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      cwd: dir,
+    });
+    result = true;
+  }
+  catch {
+    result = false;
+  }
+  gitRepoCache.set(dir, result);
+  return result;
 }
 
 /**
@@ -206,14 +252,14 @@ function loadConfig() {
 function loadModelContextWindows() {
   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
 
-  // Default context windows (fallback)
+  // Default context windows (fallback) — Claude models, 200K each
   const defaultContextWindows = {
-    'glm-4.7': 200000,
-    'glm-5': 200000,
-    'glm-5.1': 200000,
-    'claude-3-5-sonnet': 200000,
-    'claude-3-5-opus': 200000,
-    'claude-3-haiku': 200000,
+    'claude-opus-4-8': 200000,
+    'claude-opus-4-7': 200000,
+    'claude-opus-4-6': 200000,
+    'claude-sonnet-4-6': 200000,
+    'claude-sonnet-4-5': 200000,
+    'claude-haiku-4-5': 200000,
   };
 
   if (!fs.existsSync(settingsPath)) {
@@ -237,14 +283,15 @@ function loadModelContextWindows() {
 function loadPricing() {
   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
 
-  // Default pricing (USD per million tokens)
+  // Default pricing (USD per million tokens) — Claude official pricing.
+  // cache uses cache-read price; cache writes bill higher, so cost may run slightly low.
   const defaultPricing = {
-    'glm-4.7': { input: 0.15, output: 0.60, cache: 0.015, currency: 'USD' },
-    'glm-5': { input: 0.20, output: 0.80, cache: 0.02, currency: 'USD' },
-    'glm-5.1': { input: 0.20, output: 0.80, cache: 0.02, currency: 'USD' },
-    'claude-3-5-sonnet': { input: 3.00, output: 15.00, cache: 0.30, currency: 'USD' },
-    'claude-3-5-opus': { input: 15.00, output: 75.00, cache: 1.50, currency: 'USD' },
-    'claude-3-haiku': { input: 0.25, output: 1.25, cache: 0.03, currency: 'USD' },
+    'claude-opus-4-8': { input: 15, output: 75, cache: 1.5, currency: 'USD' },
+    'claude-opus-4-7': { input: 15, output: 75, cache: 1.5, currency: 'USD' },
+    'claude-opus-4-6': { input: 15, output: 75, cache: 1.5, currency: 'USD' },
+    'claude-sonnet-4-6': { input: 3, output: 15, cache: 0.3, currency: 'USD' },
+    'claude-sonnet-4-5': { input: 3, output: 15, cache: 0.3, currency: 'USD' },
+    'claude-haiku-4-5': { input: 1, output: 5, cache: 0.1, currency: 'USD' },
   };
 
   if (!fs.existsSync(settingsPath)) {
@@ -259,6 +306,35 @@ function loadPricing() {
   catch {
     return defaultPricing;
   }
+}
+
+/**
+ * Strip provider suffix variants from a model id, e.g. "glm-5.2[1m]" -> "glm-5.2".
+ */
+function baseModelId(modelId) {
+  return String(modelId).replace(/\s*\[[^\]]*\]\s*$/, '').trim();
+}
+
+/**
+ * Look up a value in a model-keyed map by exact id, then by suffix-stripped base id.
+ * Handles provider variants such as "glm-5.2[1m]" matching a configured "glm-5.2" entry.
+ */
+function lookupByModel(map, modelId) {
+  if (map[modelId] !== undefined) {
+    return map[modelId];
+  }
+  const base = baseModelId(modelId);
+  if (base !== modelId && map[base] !== undefined) {
+    return map[base];
+  }
+  // Case-insensitive fallback (display_name may differ in case from map keys)
+  const lower = base.toLowerCase();
+  for (const key of Object.keys(map)) {
+    if (key.toLowerCase() === lower) {
+      return map[key];
+    }
+  }
+  return undefined;
 }
 
 // ANSI color codes
@@ -619,7 +695,7 @@ function getContextWindowUsage(transcriptPath, modelId) {
   }
 
   const contextWindows = loadModelContextWindows();
-  const maxTokens = contextWindows[modelId] || 200000;
+  const maxTokens = lookupByModel(contextWindows, modelId) || 200000;
 
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
@@ -656,8 +732,8 @@ function getContextWindowUsage(transcriptPath, modelId) {
     const percentage = parseFloat(((lastInputTokens / maxTokens) * 100).toFixed(1));
 
     // Format tokens
-    const formatUsed = lastInputTokens >= 1000 ? `${(lastInputTokens / 1000).toFixed(1)}K` : `${lastInputTokens}`;
-    const formatMax = maxTokens >= 1000 ? `${(maxTokens / 1000).toFixed(0)}K` : `${maxTokens}`;
+    const formatUsed = lastInputTokens >= 1000000 ? `${(lastInputTokens / 1000000).toFixed(2)}M` : lastInputTokens >= 1000 ? `${(lastInputTokens / 1000).toFixed(1)}K` : `${lastInputTokens}`;
+    const formatMax = maxTokens >= 1000000 ? `${(maxTokens / 1000000).toFixed(0)}M` : maxTokens >= 1000 ? `${(maxTokens / 1000).toFixed(0)}K` : `${maxTokens}`;
 
     const result = {
       text: `${formatUsed}/${formatMax}(${percentage.toFixed(1)}%)`,
@@ -796,7 +872,7 @@ function calculateCost(transcriptPath, workspaceDir) {
 
         if (usage) {
           // Get model ID for this entry
-          let modelId = entry.model || entry.message?.model || 'glm-5.1';
+          let modelId = entry.model || entry.message?.model || 'claude-sonnet-4-6';
 
           if (!modelUsage[modelId]) {
             modelUsage[modelId] = {
@@ -823,7 +899,7 @@ function calculateCost(transcriptPath, workspaceDir) {
     const costsByCurrency = {};
 
     for (const [modelId, usage] of Object.entries(modelUsage)) {
-      const price = pricing[modelId] || pricing['glm-5.1'] || { input: 4, output: 18, cache: 1, currency: 'CNY' };
+      const price = lookupByModel(pricing, modelId) || pricing['claude-sonnet-4-6'] || { input: 3, output: 15, cache: 0.3, currency: 'USD' };
       const currency = price.currency || 'USD';
 
       if (!costsByCurrency[currency]) {
@@ -901,11 +977,11 @@ function formatTokens(tokens) {
  * Also reads settings.json to resolve model aliases like --opus
  */
 function getModelDisplay(modelId, input) {
-  // Model alias mapping from command line args to actual models
+  // Model alias mapping from CLI family flags to default model IDs
   const aliasMap = {
-    '--opus': 'glm-5.1',
-    '--sonnet': 'glm-5',
-    '--haiku': 'glm-4.5-air',
+    '--opus': 'claude-opus-4-8',
+    '--sonnet': 'claude-sonnet-4-6',
+    '--haiku': 'claude-haiku-4-5',
   };
 
   // Try to get actual model from input's model.display_name
@@ -917,15 +993,21 @@ function getModelDisplay(modelId, input) {
   const actualModel = aliasMap[modelId] || modelId;
 
   const modelMap = {
-    'glm-4.7': 'GLM-4.7',
-    'glm-5': 'GLM-5',
+    // Claude (default)
+    'claude-opus-4-8': 'Opus 4.8',
+    'claude-opus-4-7': 'Opus 4.7',
+    'claude-opus-4-6': 'Opus 4.6',
+    'claude-sonnet-4-6': 'Sonnet 4.6',
+    'claude-sonnet-4-5': 'Sonnet 4.5',
+    'claude-haiku-4-5': 'Haiku 4.5',
+    // GLM (optional — configure pricing/context via settings.json if you use these)
+    'glm-5.2': 'GLM-5.2',
     'glm-5.1': 'GLM-5.1',
+    'glm-5': 'GLM-5',
+    'glm-4.7': 'GLM-4.7',
     'glm-4.5-air': 'GLM-4.5',
-    'claude-3-5-sonnet': 'S3.5',
-    'claude-3-5-opus': 'O3.5',
-    'claude-3-haiku': 'H3',
   };
-  return modelMap[actualModel] || actualModel;
+  return lookupByModel(modelMap, actualModel) || actualModel;
 }
 
 /**
@@ -936,6 +1018,7 @@ function buildStatusLine(input) {
   const parts = [];
   const transcriptPath = input?.transcript_path;
   const workspaceDir = input?.workspace?.current_dir || process.cwd();
+  const inGitRepo = isGitRepo(workspaceDir);
 
   // 1. Directory
   if (config.fields.dir) {
@@ -946,7 +1029,7 @@ function buildStatusLine(input) {
   }
 
   // 2. Git branch
-  if (config.fields.git) {
+  if (config.fields.git && inGitRepo) {
     const gitInfo = getGitInfo(workspaceDir);
     if (gitInfo.branch) {
       const statusIcon = gitInfo.dirty ? ICONS.gitDirty : ICONS.gitClean;
@@ -956,13 +1039,13 @@ function buildStatusLine(input) {
   }
 
   // 3. Git remote status
-  if (config.fields.remote) {
+  if (config.fields.remote && inGitRepo) {
     const remoteStatus = getGitRemoteStatus(workspaceDir);
     parts.push(`${colors.cyan}${remoteStatus}${colors.reset}`);
   }
 
   // 4. Code changes
-  if (config.fields.changes) {
+  if (config.fields.changes && inGitRepo) {
     parts.push(getGitChanges(workspaceDir));
   }
 
@@ -976,7 +1059,7 @@ function buildStatusLine(input) {
 
   // 6. Context window usage
   if (config.fields.context && transcriptPath) {
-    const modelId = input?.model?.id || 'glm-4.7';
+    const modelId = input?.model?.id || 'claude-sonnet-4-6';
     const contextInfo = getContextWindowUsage(transcriptPath, modelId);
     if (contextInfo.text) {
       let contextColor;
@@ -995,7 +1078,7 @@ function buildStatusLine(input) {
 
   // 7. Model name
   if (config.fields.model && transcriptPath) {
-    const modelId = input?.model?.id || 'glm-4.7';
+    const modelId = input?.model?.id || 'claude-sonnet-4-6';
     const modelDisplay = getModelDisplay(modelId, input);
     if (modelDisplay) {
       parts.push(`M: ${modelDisplay}`);
@@ -1103,44 +1186,48 @@ function main() {
     process.exit(0);
   }
 
+  if (args.includes('--version') || args.includes('-v')) {
+    console.log(PACKAGE_VERSION);
+    process.exit(0);
+  }
+
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
-Enhanced StatusLine for Claude Code v2.1.0
+ccbar v${PACKAGE_VERSION} — Enhanced StatusLine for Claude Code
 
 USAGE:
-  token-accumulator [transcript-path]
+  ccbar [transcript-path]   Run statusline (reads stdin JSON from Claude Code)
+  echo '{"transcript_path":"..."}' | ccbar
 
 OPTIONS:
-  --reset-tokens      Reset token history for current project
-  --reset-all-tokens  Reset token history for all projects
-  --show-history      Show token history for all projects
+  --version, -v        Print version and exit
+  --help, -h           Show this help and exit
+  --reset-tokens       Reset token/cost/duration history for the current project
+  --reset-all-tokens   Reset token history for ALL projects
+  --show-history       Show token history for all projects
 
-DISPLAY FORMAT:
-  📁dir branch|status 🪟context 🤖model 💰tokens
+DISPLAY FIELDS (in order):
+  D: <dir>             Current directory (git root basename)
+  G: <branch><*>       Git branch (* when dirty)
+  <≡ | ↑N ↓N>          Remote sync status (ahead/behind)
+  +<add> -<del>        Working tree + staged + untracked changes
+  ⏱ <duration>         Active session time (idle gaps excluded)
+  <used>/<max>(<pct>)  Context window usage
+  M: <model>           Resolved model name
+  T: <tokens>M         Total session tokens (millions)
+  $: <cost> | ¥: <cost> Session cost
 
-  - dir: Current directory name
-  - branch: Git branch with status (* if dirty)
-  - context: Remaining context window (e.g., 128K)
-  - model: Model name with icon
-  - 💰tokens: Total session tokens in millions (2 decimals)
-
-FEATURES:
-  - Token accumulation persists across /clear commands
-  - Each project has its own token history (isolated by directory)
-  - Use --reset-tokens to reset current project history
+CONFIG:
+  ~/.claude/ccbar/config.json   Toggle fields (dir/git/remote/changes/duration/context/model/token/cost)
+  ~/.claude/settings.json       modelPricing, modelContextWindow overrides
 
 EXAMPLE OUTPUT:
-  📁zcf main* 🪟128K 🤖GLM-4.7 💰0.37M
+  D: myapp | G: main | ≡ | +12 -3 | ⏱ 1h 5m | 47.3K/200K(23.6%) | M: Sonnet 4.6 | T: 1.24M | $: 2.81
 
-STATUSLINE CONFIG:
-  Add to ~/.claude/settings.json:
-  {
-    "statusLine": {
-      "type": "command",
-      "command": "/opt/projects/tmp/claude-token-accumulator/src/token-accumulator.cjs",
-      "padding": 0
-    }
-  }
+INSTALL (npm):
+  npm i -g @luckvd/ccbar
+  Then in ~/.claude/settings.json:
+    { "statusLine": { "type": "command", "command": "ccbar", "padding": 0 } }
 `);
     process.exit(0);
   }
